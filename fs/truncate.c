@@ -7,6 +7,8 @@
 
 #include <sys/stat.h>           								// 文件状态头文件。含有文件或文件系统状态结构stat{}和常量。
 
+// free_ind 和 free_dind 只有一个函数调用不同，分别在30和62行，可以用函数编程的思想，将函数作为参数传入，就不用写两个函数了
+
 // 释放所有一次间接块。（内部函数）
 // 参数dev是文件系统所有设备的设备号；block是逻辑块号。成功则返回1，否则返回0。
 static int free_ind(int dev, int block)
@@ -86,6 +88,7 @@ void truncate(struct m_inode * inode)
 	// （fs/bitmap.c）。若有逻辑块忙而没有被释放则置块忙标志block_busy。
 repeat:
 	block_busy = 0;
+	// 下面的for循环是释放一级节点的代码
 	for (i = 0; i < 7; i++)
 		if (inode->i_zone[i]) {                 				// 如果块号不为0，则释放之。
 			if (free_block(inode->i_dev, inode->i_zone[i]))
@@ -114,4 +117,3 @@ repeat:
 	// 为（startup_time+jiffies/HZ）。用于取得从1970:0:0:0开始到现在为止经过的秒数。
 	inode->i_mtime = inode->i_ctime = CURRENT_TIME;
 }
-
