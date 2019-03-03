@@ -54,6 +54,7 @@ int NR_BUFFERS = 0;													// 系统含有缓冲块个数.
 // 如果指定的缓冲块bh已经上锁就让进程不可中断地睡眠在该缓冲块的等待队列b_wait中.在缓冲块解锁时,其等待队列上的所有进程将被唤醒.虽然是在关闭
 // 中断(cli)之后去睡眠的,但这样做并不会影响在其他进程上下文中响应中断.因为每个进程都在自己的TSS段中保存了标志寄存器EFLAGS的值,所在在进程
 // 切换时CPU中当前EFLAGS的值也随之改变.使用sleep_on()进入睡眠状态的进程需要用wake_up()明确地唤醒.
+// P.S. TSS 全称task state segment，是指在操作系统进程管理的过程中，任务（进程）切换时的任务现场信息,TR寄存器所指向的tss数据结构
 static inline void wait_on_buffer(struct buffer_head * bh)
 {
 	cli();							// 关中断
