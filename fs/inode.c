@@ -16,6 +16,8 @@
 // 数据块总数(1块大小 = 1KB).
 extern int *blk_size[];
 
+// 内存中的inode与设备中的inode并不完全一样，设备中的inode缺省了一些信息
+// inode_table就是存放在内存中的inode表, 但是在内核0.12上, 他的长度受限制
 struct m_inode inode_table[NR_INODE]={{0, }, };   					// 内存中i节点表(NR_INODE=64项)
 
 static void read_inode(struct m_inode * inode);						// 读指定i节点号的i节点信息.
@@ -25,9 +27,10 @@ static void write_inode(struct m_inode * inode);					// 写i节点信息到高�
 // 如果i节点已被锁定,则将当前任务置为不可中断的等待状态,并添加到该i节点的等待队列i_wait中.直到该i节点解锁并明确地唤醒本任务.
 static inline void wait_on_inode(struct m_inode * inode)
 {
+	// 要是发生睡眠, 但是在这个函数中没有重新开中断, 会不会引起什么问题
 	cli();
-	while (inode->i_lock)
-		sleep_on(&inode->i_wait);									// kernel/sched.c
+	while (inode->i_lock)                       // inode的i_lock属性只在内存中存在，在设备中不存在
+		sleep_on(&inode->i_wait);									// kernel/sched.c, 在i_wait队列上等待, i_wait是task_struct*类型
 	sti();
 }
 
@@ -45,6 +48,7 @@ static inline void lock_inode(struct m_inode * inode)
 
 // 对指定的i节点解锁.
 // 复位i节点的锁定标志,并明确地唤醒等待在此i节点等待队列i_wait上的所有进程.
+// 并不用关中断，也不用检查原先的锁状态
 static inline void unlock_inode(struct m_inode * inode)
 {
 	inode->i_lock = 0;
@@ -62,6 +66,7 @@ void invalidate_inodes(int dev)
 	// 解锁可用（若目前正被上锁的话），再判断是否属于指定设备的i节点。如果是指定设备的i节点，则看看它是否还被使用
 	// 着，即其引用计数是否不为0。若是则显示警告信息。然后释放之，即把i节点的设备号字段i_dev置。第50行上的指针
 	// 赋值"0+inode_table"等同于"inode_table"、"&inode_table[0]"。不过这样写可能更明了一些。
+	// 只是把inode节点的i_dev和i_dirty设置为0, 并没有显示的销毁, 因为在栈中, 没有办法也没有必要回收空间
 	inode = 0 + inode_table;                  						// 指向i节点表指针数组首项。
 	for(i = 0 ; i < NR_INODE ; i++, inode++) {
 		wait_on_inode(inode);           							// 等待该i节点可用（解锁）。
@@ -94,6 +99,8 @@ void sync_inodes(void)
 // 文件数据块映射到盘块的处理操作.(block位图处理函数,bmap - block map)
 // 参数:inode - 文件的i节点指针;block - 文件中的数据块号;create - 创建块标志.该函数把指定的文件数据块block对应到设备上逻辑块上,并返回逻辑块号.
 // 如果创建标志置位,则在设备上对应逻辑块不存在时就申请新磁盘块,返回文件数据块block对应在设备上的逻辑块号(盘块号).
+// 注意：只是创建block指定的一个块，而不是从0块到block块
+// 并且inode.i_zone里面存储的并不是地址, 而是逻辑块号, 是数字
 static int _bmap(struct m_inode * inode, int block, int create)
 {
 	struct buffer_head * bh;
@@ -101,6 +108,7 @@ static int _bmap(struct m_inode * inode, int block, int create)
 
 	// 首先判断参数文件数据块号block的有效性.如果块号小于0,则停机.如果块号大于直接块数 + 间接块数 + 二次间接块数,超出文件系统表示范围,则停机.
 	if (block < 0)
+	  // panic()函数是当系统发现无法继续运行下去的故障时将调用它，会导致程序中止，然后由系统显示错误号
 		panic("_bmap: block<0");
 	if (block >= 7 + 512 + 512 * 512)
 		panic("_bmap: block>big");
@@ -185,7 +193,7 @@ static int _bmap(struct m_inode * inode, int block, int create)
 	return i;
 }
 
-// 取文件数据块block在设备上对应的逻辑块号.
+// 取文件数据块block在设备上对应的逻辑块号. 不存在的话并不会创建
 // 参数:inode - 文件的内存i节点指针;block - 文件中的数据块号.
 // 若操作成功则返回对应的逻辑块号,否则返回0.
 int bmap(struct m_inode * inode, int block)
@@ -217,7 +225,7 @@ void iput(struct m_inode * inode)
 	// 标志,并返回.对于管道节点,inode->i_size存放着内存页地址.参见get_pipe_inode().
 	if (inode->i_pipe) {
 		wake_up(&inode->i_wait);
-		wake_up(&inode->i_wait2);
+		wake_up(&inode->i_wait2);    // 为什么会有一个i_wait2啊。。。
 		if (--inode->i_count)
 			return;
 		free_page(inode->i_size);
@@ -232,6 +240,7 @@ void iput(struct m_inode * inode)
 		return;
 	}
 	// 如果是块设备文件的i节点,此时逻辑块字段0(i_zone[0])中是设备号,则刷新该设备.并等待i节点解锁.
+	// 也就是说设备文件并不需要额外的设备数据块来存储设备号
 	if (S_ISBLK(inode->i_mode)) {
 		sync_dev(inode->i_zone[0]);
 		wait_on_inode(inode);
