@@ -33,7 +33,7 @@ register int __res; \
 __asm__("bt %2, %3; setb %%al":"=a" (__res):"a" (0),"r" (bitnr),"m" (*(addr))); \
 __res; })
 
-struct super_block super_block[NR_SUPER];					// 超级块结构表数组(NR_SUPER =8)
+struct super_block super_block[NR_SUPER];					// 超级块结构表数组(NR_SUPER =8), 也就是说0.12内核最多能加载8个文件系统
 /* this is initialized in init/main.c */
 /* ROOT_DEV已在init/main.c中被初始化 */
 int ROOT_DEV = 0;											// 根文件系统设备号.
@@ -42,11 +42,12 @@ int ROOT_DEV = 0;											// 根文件系统设备号.
 //　换成了超级块.
 //　锁定超级块.
 //　如果超级块已被锁定,则将当前任务置为不可中断的等待状态,并添加到该超级块等待队列s_wait中.直到该超级块解锁并明确地唤醒本任务.然后对其上锁.
+// 不可中断的等待状态, 很有意思
 static void lock_super(struct super_block * sb)
 {
 	cli();													//　关中断
-	while (sb->s_lock)										//　如果该超级块已经上锁,则睡眠等待.
-		sleep_on(&(sb->s_wait));
+	while (sb->s_lock)										//　如果该超级块已经上锁,则睡眠等待. 这儿必须用while, 不能用if的
+		sleep_on(&(sb->s_wait));           // task_struct这个结构是linux用来进程管理和控制的结构, 也就是操作系统中的PCB
 	sb->s_lock = 1;											//　给该超级块加锁(置锁定标志)
 	sti();													//　开中断.
 }
@@ -58,7 +59,7 @@ static void free_super(struct super_block * sb)
 {
 	cli();
 	sb->s_lock = 0;											// 复位锁定标志.
-	wake_up(&(sb->s_wait));									// 唤醒等待该超级块的进程.
+	wake_up(&(sb->s_wait));									// 明确唤醒等待该超级块的进程. 并且只唤醒等待队列中的第一个进程
 	sti();													// wake_up()在kernel/sched.c
 }
 
@@ -73,7 +74,7 @@ static void wait_on_super(struct super_block * sb)
 }
 
 // 取指定设备的超级块.
-// 在超级块表(数组)中搜索指定设备dev的超级块结构信息.若找到则返回超级块的指针,否则返回空指针.
+// 在超级块表(数组super_block[])中搜索指定设备dev的超级块结构信息.若找到则返回超级块的指针,否则返回空指针.
 struct super_block * get_super(int dev)
 {
 	struct super_block * s;									// s是超级块数据结构指针.
@@ -101,6 +102,7 @@ struct super_block * get_super(int dev)
 // 释放（放回）指定设备的超级块。
 // 释放设备所使用的超级块数组项（置s_dev = 0），并释放该设备i节点位图和逻辑块位图所占用的高速缓冲块。如果超级块对应的
 // 文件系统是根文件系统，或者其某个i节点上已经安装了其他的文件系统，则不能释放该超级块。
+// 在调用unmount写在一个文件系统或者更换磁盘时候会调用该函数
 void put_super(int dev)
 {
 	struct super_block * sb;
@@ -116,7 +118,7 @@ void put_super(int dev)
 	}
 	if (!(sb = get_super(dev)))
 		return;
-	if (sb->s_imount) {
+	if (sb->s_imount) {    // s_imount是该文件系统被安装到的i节点
 		printk("Mounted disk changed - tssk, tssk\n\r");
 		return;
 	}
@@ -127,9 +129,10 @@ void put_super(int dev)
 	lock_super(sb);
 	sb->s_dev = 0;                          		// 置超级块空闲。
 	for(i = 0; i < I_MAP_SLOTS; i++)
-		brelse(sb->s_imap[i]);
+		brelse(sb->s_imap[i]);                    // i_map是个长度为8的数组，数组元素是buffer_head *, 每个元素指向buffer中的一个地址(在fs的inode位图大小限制之内)
 	for(i = 0; i < Z_MAP_SLOTS; i++)
-		brelse(sb->s_zmap[i]);
+		brelse(sb->s_zmap[i]);                    // 中_map是个长度为8的数组，数组元素是buffer_head *, 每个元素指向buffer中的一个地址(在fs的逻辑块位图大小限制之内)
+  // free_super实际上是解锁, 解除对super_block的锁
 	free_super(sb);
 	return;
 }
@@ -173,9 +176,10 @@ static struct super_block * read_super(int dev)
 		free_super(s);
 		return NULL;
 	}
+	// s是内存中的super_block, 这个操作将磁盘super_block结构(虽然存储在buffer)强制给了s(内存中的supper_block结构)
 	*((struct d_super_block *) s) =
 		*((struct d_super_block *) bh->b_data);
-	brelse(bh);
+	brelse(bh);    // 当super_block的信息已经完全从磁盘那儿复制完就可以直接释放了
 	// 现在我们从设备dev上得到了文件系统的超级块,于是开始检查这个超级块的有效性并从设备上读取i节点位图和逻辑块位图等信息.如果所读取的超级块的文件系统魔数字段不对,
 	// 说明设备上不是正确的文件系统,因此向上面一样,释放上面选定的超级块数组中的项,并解锁该项,返回空指针退出.
 	// 对于该版Linux内核,只支持MINIX文件系统1.0版本,其魔数是0x137f.
@@ -216,6 +220,7 @@ static struct super_block * read_super(int dev)
 	}
 	// 否则一切成功.另外,由于对于申请空闲i节点的函数来讲,如果设备所有的i节点已经全被使用,则查找函数会返回0值.因此0号i节点是不能用的,所以这里将位图中第1块的最低位设置为
 	// 1,以防止文件系统分配0号i节点.同样的道理,也将逻辑块位图的最低位设置为1.最后函数解锁该超级块,并返回超级块指针.
+	// 这个位图难道不是在mkfs的时候就一已经是1了吗, 还是书上说的默认为1是考下面两行代码实现的。。。
 	s->s_imap[0]->b_data[0] |= 1;
 	s->s_zmap[0]->b_data[0] |= 1;
 	free_super(s);
@@ -237,6 +242,7 @@ int sys_umount(char * dev_name)
 	// dev_i，返回出错码。
 	if (!(inode = namei(dev_name)))
 		return -ENOENT;
+		// ？？？
 	dev = inode->i_zone[0];
 	if (!S_ISBLK(inode->i_mode)) {
 		iput(inode);                    				// fs/inode.c。
@@ -295,6 +301,7 @@ int sys_mount(char * dev_name, char * dir_name, int rw_flag)
 	iput(dev_i);
 	if (!(dir_i = namei(dir_name)))
 		return -ENOENT;
+	// 这个引用不应该是1吧。。。
 	if (dir_i->i_count != 1 || dir_i->i_num == ROOT_INO) {
 		iput(dir_i);
 		return -EBUSY;
@@ -367,6 +374,7 @@ void mount_root(void)
 	current->root = mi;
 	// 然后我们对根文件系统上的资源作统计工作.统计该设备上空闲块数和空闲i节点数.首先令i等于超级块中表明的设备逻辑块总数.然后根据逻辑块位图中相应位的占用情况统计出空闲块数.
 	// 这里宏函数set_bit()只是在测试位,而非设置位."i&8191"用于取得i节点号在当前位图块中对应的位偏移值."i>>13"是将i除以8192,也即除一个磁盘块包含的位数.
+  // 这些统计代码在现代的内核中还存在吗, 需要检查一下开机输出吧
 	free = 0;
 	i = p->s_nzones;
 	while (-- i >= 0)
