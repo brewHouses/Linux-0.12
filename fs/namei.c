@@ -29,7 +29,7 @@ static struct m_inode * _namei(const char * filename, struct m_inode * base, int
 //
 // 下面是访问模式宏.x是头文件include/fcntl.h中行7行开始定义的文件访问(打开)标志.这个宏根据文件访问标志x的值来索引双引号中对应的数值.双引号中
 // 有4个八进制数值(实际表示4个控制字符):"\004\002\006\377",分别表示读,写和执行的权限为:r,w,rw和wxrwxrwx,并且分别对应x的索引值0--3.例如,如果x为2,
-// 则该宏返回八进制值006,表示可读可写(rw).另外,其中O_ACCMODE = 00003,是索引值x的屏蔽码.
+// 则该宏返回八进制值006,表示可读可写(rw).另外,其中O_ACCMODE = 00003,是索引值x的屏蔽码. 保证数组的index经过(x)&0x03后, 最大值为3, 不会越界
 #define ACC_MODE(x) ("\004\002\006\377"[(x) & O_ACCMODE])
 
 /*
@@ -182,6 +182,7 @@ static struct buffer_head * find_entry(struct m_inode ** dir,
 		/* 伪根中的'..'如同一个假'.'(只需改变名字长度) */
 		if ((*dir) == current->root)
 			namelen = 1;
+		// i_num就是i节点号, 并没有记录在磁盘的inode结构中, 而是记录在内存的inode结构中
 		else if ((*dir)->i_num == ROOT_INO) {
 			/* '..' over a mount-point results in 'dir' being exchanged for the mounted
 			   directory-inode. NOTE! We set mounted, so that we can iput the new dir */
@@ -209,18 +210,19 @@ static struct buffer_head * find_entry(struct m_inode ** dir,
 		// 如果当前目录项数据块已经搜索完,还没有找到匹配的目录项,则释放当前目录项数据块.再读入目录的下一个逻辑块.若这块为空,则只要还没有搜索完目录中的所有目录项,就
 		// 跳过该块,继续读目录的下一逻辑块.若该块不空,就让de指向该数据块,然后在其中继续搜索.其中141行上i/DIR_ENTRIES_PER_BLOCK可得到当前搜索的目录项所在目录文件中的
 		// 块号,而bmap()函数(inode.c)则可计算出在设备上对应的逻辑块号.
+		// 满足下面的if语句, 就说明当前的buffer块搜索结束, 就需要找下一个数据块
 		if ((char *)de >= BLOCK_SIZE + bh->b_data) {
 			brelse(bh);
 			bh = NULL;
 			if (!(block = bmap(*dir, i / DIR_ENTRIES_PER_BLOCK)) ||
-			    !(bh = bread((*dir)->i_dev, block))) {
+			    !(bh = bread((*dir)->i_dev, block))) {           // 如果能进入这个if里面, 这说明要么没有相应的逻辑块, 要么相应的逻辑块没有数据, 那么就得跳过这个块去找下一个
 				i += DIR_ENTRIES_PER_BLOCK;
 				continue;
 			}
 			de = (struct dir_entry *) bh->b_data;
 		}
 		// 如果找到匹配的目录项的话,则返回目录项结构指针de和该目录项i节点指针*dir以及该目录项数据块指针bh,并退出函数.否则继续在目录项数据块中比较下一个目录项.
-		if (match(namelen, name, de)) {
+		if (match(namelen, name, de)) {   // 这个按理说应该是比较name和de->name, 但是考虑到struct在内存中的存储, 就可以简化成name和de比较, 但是必须限定长度
 			*res_dir = de;
 			return bh;
 		}
@@ -247,7 +249,7 @@ static struct buffer_head * find_entry(struct m_inode ** dir,
  * 使用与find_entry()同样的方法，往指定目录中添加一指定文件名的目录项。如果失败则返回NULL。
  *
  * 注意！！'de'（指定目录项结构指针）的i节点部分被设置为0 - 这表示在调用该函数和往目录项中添加信息之间不能去睡眠，
- * 因为如果睡眠，那么其他人（进程）可能会使用该目录项。
+ * 因为如果睡眠，那么其他人（进程）可能会使用该目录项。这块儿并不明白
  */
 // 根据指定的目录和文件名添加目录项。
 // 参数：dir - 指定目录的i节点；name - 文件名；namelen - 文件名长度；
@@ -410,7 +412,7 @@ static struct m_inode * get_dir(const char * pathname, struct m_inode * inode)
 	if ((c = get_fs_byte(pathname)) == '/') {
 		iput(inode);											// 放回原i节点.
 		inode = current->root;									// 为进程指定的根i节点.
-		pathname++;
+		pathname++;                       // 也就是删除第一个字符
 		inode->i_count++;
 	}
 	// 然后针对路径名中的各个目录名部分和文件名进行循环处理。在循环处理过程中，我们先要对当前正在处理的目录名部分的i节点进行有效性判断，并且把
@@ -614,6 +616,7 @@ int open_namei(const char * pathname, int flag, int mode,
 			iput(dir);
 			return -ENOENT;
 		}
+		// 写权限是对应于目录的而不是目录项
 		if (!permission(dir, MAY_WRITE)) {       						// 没有写权限，放回i节点
 			iput(dir);
 			return -EACCES;
@@ -621,6 +624,7 @@ int open_namei(const char * pathname, int flag, int mode,
 		// 现在我们确定了是创建操作并且有写操作许可。因此我们就在目录i节点对应设备上申请一个新的i节点给路径名上指定的文件使用。
 		// 若失败则放回目录的i节点，并返回没有空间出错码。否则使用该新i节点，对其进行初始设置：置节点的用户id；对应节点访问模式；
 		// 置已修改标志。然后并在指定目录dir中添加一个新目录项。
+		// new_inode在bitmap.c中, 在其中赋予了inode的节点号
 		inode = new_inode(dir->i_dev);
 		if (!inode) {
 			iput(dir);
@@ -1082,7 +1086,7 @@ int sys_unlink(const char * name)
 	inode->i_nlinks--;
 	inode->i_dirt = 1;
 	inode->i_ctime = CURRENT_TIME;
-	iput(inode);
+	iput(inode);   // iput里面调用truncate就会删除文件的全部目录块
 	iput(dir);
 	return 0;
 }
@@ -1254,4 +1258,3 @@ int sys_link(const char * oldname, const char * newname)
 	iput(oldinode);
 	return 0;
 }
-

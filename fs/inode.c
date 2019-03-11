@@ -343,6 +343,7 @@ struct m_inode * get_pipe_inode(void)
 // 参数:dev - 设备号;nr - i节点号.
 // 从设备上读取指定节点号的i节点结构内容到内存i节点表中,并且返回该i节点指针.首先在位于高速缓冲区中的i节点表中搜寻,若找到指定节点号的i节点则在经过一些
 // 判断处理后返回该i节点指针.否则从设备dev上读取指定i节点号的i节点信息放入i节点表中,并返回该i节点指针.
+// 所以i节点是操作系统调用这个函数在家在的时候动态指定的
 struct m_inode * iget(int dev, int nr)
 {
 	struct m_inode * inode, * empty;

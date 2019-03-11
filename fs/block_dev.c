@@ -68,6 +68,7 @@ int block_write(int dev, long * pos, char * buf, int count)
 		written += chars;               						// 累计写入字节数。
 		count -= chars;
 		while (chars-- > 0)
+		  // 从用户空间复制数据
 			*(p++) = get_fs_byte(buf++);
 		bh->b_dirt = 1;
 		brelse(bh);
