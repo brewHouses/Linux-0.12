@@ -46,8 +46,10 @@ static int dupfd(unsigned int fd, unsigned int arg)
 // 复制指定文件句柄oldfd，新文件句柄值等于newfd。如果newfd已打开，则首先关闭之。
 // 参数：oldfd -- 原文件句柄；newfd - 新文件句柄。
 // 返回新文件句柄值。
+// 新系统实现中, 该方法中的两个函数调用是原子操作
 int sys_dup2(unsigned int oldfd, unsigned int newfd)
 {
+	// 先关闭以后, 然后按照dupfd的策略肯定会找的到啊
 	sys_close(newfd);               						// 若句柄newfd已经打开，则首先关闭之。
 	return dupfd(oldfd, newfd);      						// 复制并返回新句柄。
 }
